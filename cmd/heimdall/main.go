@@ -9,6 +9,7 @@ import (
 )
 
 func main() {
+	logger.Init("logs.csv")
 	capture, err := capture.Start("tun0")
 	defer capture.Stop()
 	if err != nil {
