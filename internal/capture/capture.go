@@ -6,7 +6,7 @@ import (
 )
 
 type Capture struct {
-	Packets <-chan []byte
+	Packets <-chan gopacket.Packet
 	stop    func()
 }
 
@@ -15,7 +15,6 @@ func (c *Capture) Stop() {
 		return
 	}
 	c.stop()
-	return
 }
 
 func Start(iface string) (*Capture, error) {
@@ -25,11 +24,11 @@ func Start(iface string) (*Capture, error) {
 	}
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	packets := make(chan []byte)
+	packets := make(chan gopacket.Packet, 1000)
 	go func() {
 		defer close(packets)
 		for packet := range packetSource.Packets() {
-			packets <- packet.Data()
+			packets <- packet
 		}
 	}()
 

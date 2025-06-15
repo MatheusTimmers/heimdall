@@ -1,3 +1,4 @@
+// internal/parser/parser.go
 package parser
 
 import (
@@ -8,50 +9,131 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-type PacketInfo struct {
-	Timestamp time.Time
-	SrcMAC    string
-	DstMAC    string
-	EtherType layers.EthernetType
-	SrcIP     net.IP
-	DstIP     net.IP
-	Protocol  layers.IPProtocol
-	SrcPort   uint16
-	DstPort   uint16
+// Agrupa os campos extraídos da camada Ethernet.
+type Layer2Info struct {
+	Timestamp    time.Time
+	SrcMAC       string
+	DstMAC       string
+	EtherType    layers.EthernetType
+	PacketLength int
 }
 
-func Parse(data []byte) (PacketInfo, error) {
-	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-	info := PacketInfo{Timestamp: time.Now()}
+// Agrupa os campos extraídos da camada IP (v4 ou v6).
+type Layer3Info struct {
+	Timestamp    time.Time
+	SrcIP        net.IP
+	DstIP        net.IP
+	Protocol     uint8
+	ProtocolName string
+	PacketLength int
+}
 
-	if ethLayer := packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
-		eth := ethLayer.(*layers.Ethernet)
-		info.SrcMAC = eth.SrcMAC.String()
-		info.DstMAC = eth.DstMAC.String()
-		info.EtherType = eth.EthernetType
+// Agrupa os campos extraídos da camada de transporte (TCP/UDP).
+type Layer4Info struct {
+	Timestamp    time.Time
+	SrcIP        net.IP
+	SrcPort      uint16
+	DstIP        net.IP
+	DstPort      uint16
+	ProtocolName string
+	PacketLength int
+}
+
+type Parser struct {
+	L2 chan Layer2Info
+	L3 chan Layer3Info
+	L4 chan Layer4Info
+}
+
+func New(inPackets <-chan gopacket.Packet) *Parser {
+	p := &Parser{
+		L2: make(chan Layer2Info, 100),
+		L3: make(chan Layer3Info, 100),
+		L4: make(chan Layer4Info, 100),
 	}
+	go p.run(inPackets)
+	return p
+}
 
-	if ip4 := packet.Layer(layers.LayerTypeIPv4); ip4 != nil {
-		ipv4 := ip4.(*layers.IPv4)
-		info.SrcIP = ipv4.SrcIP
-		info.DstIP = ipv4.DstIP
-		info.Protocol = ipv4.Protocol
-	} else if ip6 := packet.Layer(layers.LayerTypeIPv6); ip6 != nil {
-		ipv6 := ip6.(*layers.IPv6)
-		info.SrcIP = ipv6.SrcIP
-		info.DstIP = ipv6.DstIP
-		info.Protocol = ipv6.NextHeader
+func (p *Parser) run(in <-chan gopacket.Packet) {
+	defer func() {
+		close(p.L2)
+		close(p.L3)
+		close(p.L4)
+	}()
+
+	for pkt := range in {
+		meta := pkt.Metadata().CaptureInfo
+		ts := meta.Timestamp
+		length := meta.CaptureLength
+
+		// — Camada 2: Ethernet —
+		if ethL := pkt.Layer(layers.LayerTypeEthernet); ethL != nil {
+			eth := ethL.(*layers.Ethernet)
+			p.L2 <- Layer2Info{
+				Timestamp:    ts,
+				SrcMAC:       eth.SrcMAC.String(),
+				DstMAC:       eth.DstMAC.String(),
+				EtherType:    eth.EthernetType,
+				PacketLength: length,
+			}
+		}
+
+		// — Camada 3: IPv4 ou IPv6 —
+		var srcIP, dstIP net.IP
+		if ip4 := pkt.Layer(layers.LayerTypeIPv4); ip4 != nil {
+			ip := ip4.(*layers.IPv4)
+			srcIP = ip.SrcIP
+			dstIP = ip.DstIP
+			p.L3 <- Layer3Info{
+				Timestamp:    ts,
+				ProtocolName: "IPv4",
+				SrcIP:        srcIP,
+				DstIP:        dstIP,
+				Protocol:     uint8(ip.Protocol),
+				PacketLength: length,
+			}
+		} else if ip6 := pkt.Layer(layers.LayerTypeIPv6); ip6 != nil {
+			ip := ip6.(*layers.IPv6)
+			srcIP = ip.SrcIP
+			dstIP = ip.DstIP
+			p.L3 <- Layer3Info{
+				Timestamp:    ts,
+				ProtocolName: "IPv4",
+				SrcIP:        srcIP,
+				DstIP:        dstIP,
+				Protocol:     uint8(ip.NextHeader),
+				PacketLength: length,
+			}
+		}
+
+		// — Camada 4: TCP ou UDP —
+		if tl := pkt.TransportLayer(); tl != nil {
+			name := tl.LayerType().String()
+			switch {
+			case pkt.Layer(layers.LayerTypeTCP) != nil:
+				tcp := pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
+				p.L4 <- Layer4Info{
+					Timestamp:    ts,
+					ProtocolName: name,
+					SrcIP:        srcIP,
+					SrcPort:      uint16(tcp.SrcPort),
+					DstIP:        dstIP,
+					DstPort:      uint16(tcp.DstPort),
+					PacketLength: length,
+				}
+			case pkt.Layer(layers.LayerTypeUDP) != nil:
+				udp := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
+				p.L4 <- Layer4Info{
+					Timestamp:    ts,
+					ProtocolName: name,
+					SrcIP:        srcIP,
+					SrcPort:      uint16(udp.SrcPort),
+					DstIP:        dstIP,
+					DstPort:      uint16(udp.DstPort),
+					PacketLength: length,
+				}
+			}
+		}
 	}
-
-	if tcp := packet.Layer(layers.LayerTypeTCP); tcp != nil {
-		t := tcp.(*layers.TCP)
-		info.SrcPort = uint16(t.SrcPort)
-		info.DstPort = uint16(t.DstPort)
-	} else if udp := packet.Layer(layers.LayerTypeUDP); udp != nil {
-		u := udp.(*layers.UDP)
-		info.SrcPort = uint16(u.SrcPort)
-		info.DstPort = uint16(u.DstPort)
-	}
-
-	return info, nil
 }
