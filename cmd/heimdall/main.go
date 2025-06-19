@@ -4,8 +4,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
+	"time"
 
 	"github.com/MatheusTimmers/heimdall/internal/capture"
 	"github.com/MatheusTimmers/heimdall/internal/logger"
@@ -36,33 +36,71 @@ func main() {
 	defer layer4Logger.Close()
 
 	iface := os.Args[1]
-	cap, err := capture.Start(iface)
+	frames, stop, err := capture.StartRawSocket(iface)
+	defer stop()
 	if err != nil {
 		log.Fatalf("failed to start capture: %v", err)
 	}
-	defer cap.Stop()
 
-	ps := parser.New(cap.Packets)
+	for raw := range frames {
+		ts := time.Now()
 
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go consume(ps.L2, layer2Logger.Log, &wg)
-	go consume(ps.L3, layer3Logger.Log, &wg)
-	go consume(ps.L4, layer4Logger.Log, &wg)
+		log.Printf("Received raw: %x", raw)
+
+		info2, info3, info4, err := parser.ParseFrame(raw, ts)
+		if err != nil {
+			continue
+		}
+
+		log.Printf("    [L2] %s → %s | EtherType: 0x%04x | Comprimento: %d",
+			info2.SrcMAC,
+			info2.DstMAC,
+			info2.EtherType,
+			info2.PacketLength,
+		)
+
+		log.Printf("    [L3] %s → %s | Protocolo: %s (ID=%d) | Comprimento: %d",
+			info3.SrcIP,
+			info3.DstIP,
+			info3.ProtocolName,
+			info3.Protocol,
+			info3.PacketLength,
+		)
+
+		if info4.ProtocolName != "" {
+			log.Printf("    [L4] %s:%d → %s:%d | Protocolo: %s | Comprimento: %d",
+				info4.SrcIP,
+				info4.SrcPort,
+				info4.DstIP,
+				info4.DstPort,
+				info4.ProtocolName,
+				info4.PacketLength,
+			)
+		}
+
+		if err := layer2Logger.Log(info2); err != nil {
+			log.Printf("erro log L2: %v", err)
+		}
+		if err := layer3Logger.Log(info3); err != nil {
+			log.Printf("erro log L3: %v", err)
+		}
+
+		if info4.ProtocolName != "" {
+			if err := layer4Logger.Log(info4); err != nil {
+				log.Printf("erro log L4: %v", err)
+			}
+		}
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	go func() {
+		<-sig
+		stop()
+		layer2Logger.Close()
+		layer3Logger.Close()
+		layer4Logger.Close()
+		os.Exit(0)
+	}()
 	log.Println("Shutting down...")
-	cap.Stop()
-	wg.Wait()
-}
-
-func consume[T any](in <-chan T, logFn func(T) error, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for pkt := range in {
-		if err := logFn(pkt); err != nil {
-			log.Printf("error logging: %v", err)
-		}
-	}
 }

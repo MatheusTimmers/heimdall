@@ -1,24 +1,24 @@
-// internal/parser/parser.go
+// internal/parser/manual.go
 package parser
 
 import (
+	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
 	"time"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 )
 
-// Agrupa os campos extraídos da camada Ethernet.
+// Layer2Info ...
 type Layer2Info struct {
 	Timestamp    time.Time
 	SrcMAC       string
 	DstMAC       string
-	EtherType    layers.EthernetType
+	EtherType    uint16
 	PacketLength int
 }
 
-// Agrupa os campos extraídos da camada IP (v4 ou v6).
+// Layer3Info ...
 type Layer3Info struct {
 	Timestamp    time.Time
 	SrcIP        net.IP
@@ -28,7 +28,7 @@ type Layer3Info struct {
 	PacketLength int
 }
 
-// Agrupa os campos extraídos da camada de transporte (TCP/UDP).
+// Layer4Info ...
 type Layer4Info struct {
 	Timestamp    time.Time
 	SrcIP        net.IP
@@ -39,101 +39,153 @@ type Layer4Info struct {
 	PacketLength int
 }
 
-type Parser struct {
-	L2 chan Layer2Info
-	L3 chan Layer3Info
-	L4 chan Layer4Info
+func ParseFrame(data []byte, ts time.Time) (
+	l2 Layer2Info,
+	l3 Layer3Info,
+	l4 Layer4Info,
+	err error,
+) {
+	var ethType uint16
+	var offset int
+	if l2, ethType, offset, err = parseEthernet(data, ts); err != nil {
+		return
+	}
+
+	var newOffset int
+	if l3, newOffset, err = parseL3(data, ethType, offset, ts); err != nil {
+		return
+	}
+
+	switch l3.Protocol {
+	case 6, 17, 1, 58:
+		if l4, err = parseL4(data, newOffset, l3, ts); err != nil {
+			return
+		}
+	default:
+	}
+
+	return
 }
 
-func New(inPackets <-chan gopacket.Packet) *Parser {
-	p := &Parser{
-		L2: make(chan Layer2Info, 100),
-		L3: make(chan Layer3Info, 100),
-		L4: make(chan Layer4Info, 100),
+func parseEthernet(data []byte, ts time.Time) (
+	l2 Layer2Info, ethType uint16, offset int, err error,
+) {
+	totalLen := len(data)
+	if totalLen < 14 {
+		err = errors.New("frame muito curto")
+		return
 	}
-	go p.run(inPackets)
-	return p
+	l2.Timestamp = ts
+	l2.PacketLength = totalLen
+	l2.DstMAC = net.HardwareAddr(data[0:6]).String()
+	l2.SrcMAC = net.HardwareAddr(data[6:12]).String()
+
+	ethType = binary.BigEndian.Uint16(data[12:14])
+	offset = 14
+
+	for ethType == 0x8100 && totalLen >= offset+4 {
+		ethType = binary.BigEndian.Uint16(data[offset+2 : offset+4])
+		offset += 4
+	}
+	l2.EtherType = ethType
+	return
 }
 
-func (p *Parser) run(in <-chan gopacket.Packet) {
-	defer func() {
-		close(p.L2)
-		close(p.L3)
-		close(p.L4)
-	}()
+func parseL3(
+	data []byte,
+	ethType uint16,
+	offset int,
+	ts time.Time,
+) (l3 Layer3Info, newOffset int, err error) {
+	totalLen := len(data)
+	l3.Timestamp = ts
+	l3.PacketLength = totalLen
+	newOffset = offset
 
-	for pkt := range in {
-		meta := pkt.Metadata().CaptureInfo
-		ts := meta.Timestamp
-		length := meta.CaptureLength
-
-		// — Camada 2: Ethernet —
-		if ethL := pkt.Layer(layers.LayerTypeEthernet); ethL != nil {
-			eth := ethL.(*layers.Ethernet)
-			p.L2 <- Layer2Info{
-				Timestamp:    ts,
-				SrcMAC:       eth.SrcMAC.String(),
-				DstMAC:       eth.DstMAC.String(),
-				EtherType:    eth.EthernetType,
-				PacketLength: length,
-			}
+	switch ethType {
+	case 0x0806: // ARP
+		if totalLen < offset+28 {
+			err = errors.New("ARP truncado")
+			return
 		}
+		l3.SrcIP = net.IP(data[offset+14 : offset+18])
+		l3.DstIP = net.IP(data[offset+24 : offset+28])
+		l3.Protocol = 0
+		l3.ProtocolName = "ARP"
 
-		// — Camada 3: IPv4 ou IPv6 —
-		var srcIP, dstIP net.IP
-		if ip4 := pkt.Layer(layers.LayerTypeIPv4); ip4 != nil {
-			ip := ip4.(*layers.IPv4)
-			srcIP = ip.SrcIP
-			dstIP = ip.DstIP
-			p.L3 <- Layer3Info{
-				Timestamp:    ts,
-				ProtocolName: "IPv4",
-				SrcIP:        srcIP,
-				DstIP:        dstIP,
-				Protocol:     uint8(ip.Protocol),
-				PacketLength: length,
-			}
-		} else if ip6 := pkt.Layer(layers.LayerTypeIPv6); ip6 != nil {
-			ip := ip6.(*layers.IPv6)
-			srcIP = ip.SrcIP
-			dstIP = ip.DstIP
-			p.L3 <- Layer3Info{
-				Timestamp:    ts,
-				ProtocolName: "IPv4",
-				SrcIP:        srcIP,
-				DstIP:        dstIP,
-				Protocol:     uint8(ip.NextHeader),
-				PacketLength: length,
-			}
+	case 0x0800: // IPv4
+		if totalLen < offset+20 {
+			err = errors.New("IPv4 header incompleto")
+			return
 		}
+		ihl := int(data[offset]&0x0F) * 4
+		if ihl < 20 || totalLen < offset+ihl {
+			err = errors.New("IPv4 IHL inválido")
+			return
+		}
+		l3.SrcIP = net.IP(data[offset+12 : offset+16])
+		l3.DstIP = net.IP(data[offset+16 : offset+20])
+		proto := data[offset+9]
+		l3.Protocol = proto
+		l3.ProtocolName = "IPv4"
 
-		// — Camada 4: TCP ou UDP —
-		if tl := pkt.TransportLayer(); tl != nil {
-			name := tl.LayerType().String()
-			switch {
-			case pkt.Layer(layers.LayerTypeTCP) != nil:
-				tcp := pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
-				p.L4 <- Layer4Info{
-					Timestamp:    ts,
-					ProtocolName: name,
-					SrcIP:        srcIP,
-					SrcPort:      uint16(tcp.SrcPort),
-					DstIP:        dstIP,
-					DstPort:      uint16(tcp.DstPort),
-					PacketLength: length,
-				}
-			case pkt.Layer(layers.LayerTypeUDP) != nil:
-				udp := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
-				p.L4 <- Layer4Info{
-					Timestamp:    ts,
-					ProtocolName: name,
-					SrcIP:        srcIP,
-					SrcPort:      uint16(udp.SrcPort),
-					DstIP:        dstIP,
-					DstPort:      uint16(udp.DstPort),
-					PacketLength: length,
-				}
-			}
+		newOffset = offset + ihl
+
+	case 0x86DD: // IPv6
+		if totalLen < offset+40 {
+			err = errors.New("IPv6 header incompleto")
+			return
 		}
+		l3.SrcIP = net.IP(data[offset+8 : offset+24])
+		l3.DstIP = net.IP(data[offset+24 : offset+40])
+		proto := data[offset+6]
+		l3.Protocol = proto
+		l3.ProtocolName = "IPv6"
+
+		newOffset = offset + 40
+
+	default:
 	}
+	return
+}
+
+func parseL4(
+	data []byte,
+	offset int,
+	l3 Layer3Info,
+	ts time.Time,
+) (l4 Layer4Info, err error) {
+	totalLen := len(data)
+	l4.Timestamp = ts
+	l4.PacketLength = totalLen
+	l4.SrcIP = l3.SrcIP
+	l4.DstIP = l3.DstIP
+
+	switch l3.Protocol {
+	case 6: // TCP
+		if totalLen < offset+4 {
+			err = errors.New("TCP header incompleto")
+			return
+		}
+		l4.SrcPort = binary.BigEndian.Uint16(data[offset : offset+2])
+		l4.DstPort = binary.BigEndian.Uint16(data[offset+2 : offset+4])
+		l4.ProtocolName = "TCP"
+
+	case 17: // UDP
+		if totalLen < offset+4 {
+			err = errors.New("UDP header incompleto")
+			return
+		}
+		l4.SrcPort = binary.BigEndian.Uint16(data[offset : offset+2])
+		l4.DstPort = binary.BigEndian.Uint16(data[offset+2 : offset+4])
+		l4.ProtocolName = "UDP"
+
+	case 1:
+		l4.ProtocolName = "ICMPv4"
+	case 58:
+		l4.ProtocolName = "ICMPv6"
+	default:
+		l4.ProtocolName = fmt.Sprintf("%d", l3.Protocol)
+	}
+	return
 }
