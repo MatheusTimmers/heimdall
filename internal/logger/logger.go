@@ -39,6 +39,9 @@ func newLogger(path string, header []string) (*Logger, error) {
 			return nil, err
 		}
 		writer.Flush()
+		if err = writer.Error(); err != nil {
+			return nil, err
+		}
 	}
 
 	return &Logger{
@@ -94,7 +97,7 @@ func (l *Layer2Logger) Log(p parser.Layer2Info) error {
 	}
 
 	l.writer.Flush()
-	return nil
+	return l.writer.Error()
 }
 
 func (l *Layer3Logger) Log(p parser.Layer3Info) error {
@@ -114,7 +117,7 @@ func (l *Layer3Logger) Log(p parser.Layer3Info) error {
 	}
 
 	l.writer.Flush()
-	return nil
+	return l.writer.Error()
 }
 
 func (l *Layer4Logger) Log(p parser.Layer4Info) error {
@@ -135,12 +138,15 @@ func (l *Layer4Logger) Log(p parser.Layer4Info) error {
 	}
 
 	l.writer.Flush()
-	return nil
+	return l.writer.Error()
 }
 
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.writer.Flush()
+	if err := l.writer.Error(); err != nil {
+		return err
+	}
 	return l.file.Close()
 }

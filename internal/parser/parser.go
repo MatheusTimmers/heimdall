@@ -39,31 +39,28 @@ type Layer4Info struct {
 	PacketLength int
 }
 
-func ParseFrame(data []byte, ts time.Time) (
+func ParseEthernetFrame(data []byte, ts time.Time) (
 	l2 Layer2Info,
+	ethType uint16,
+	offset int,
+	err error,
+) {
+	l2, ethType, offset, err = parseEthernet(data, ts)
+	return
+}
+
+func ParseL3L4Frame(data []byte, ethType uint16, offset int, ts time.Time) (
 	l3 Layer3Info,
 	l4 Layer4Info,
 	err error,
 ) {
-	var ethType uint16
-	var offset int
-	if l2, ethType, offset, err = parseEthernet(data, ts); err != nil {
-		return
-	}
-
 	var newOffset int
 	if l3, newOffset, err = parseL3(data, ethType, offset, ts); err != nil {
 		return
 	}
-
-	switch l3.Protocol {
-	case 6, 17, 1, 58:
-		if l4, err = parseL4(data, newOffset, l3, ts); err != nil {
-			return
-		}
-	default:
+	if l4, err = parseL4(data, newOffset, l3, ts); err != nil {
+		return
 	}
-
 	return
 }
 

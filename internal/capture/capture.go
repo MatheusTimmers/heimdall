@@ -4,28 +4,13 @@ import (
 	"net"
 	"syscall"
 	"unsafe"
-
-	"github.com/google/gopacket"
 )
-
-type Capture struct {
-	Packets <-chan gopacket.Packet
-	stop    func()
-}
-
-func (c *Capture) Stop() {
-	if c.stop == nil {
-		return
-	}
-	c.stop()
-}
 
 func htons(i uint16) uint16 {
 	return (i<<8)&0xff00 | i>>8
 }
 
 func setPromisc(iface string, fd int) error {
-	// Prepara o buffer IFREQ: nome da interface + espaço para flags
 	var ifr [syscall.IFNAMSIZ + 16]byte
 	copy(ifr[:], iface)
 
@@ -40,12 +25,10 @@ func setPromisc(iface string, fd int) error {
 		return errno
 	}
 
-	// 2) Seta o bit IFF_PROMISC (na posição IFNAMSIZ do struct)
 	flags := *(*uint16)(unsafe.Pointer(&ifr[syscall.IFNAMSIZ]))
 	flags |= syscall.IFF_PROMISC
 	*(*uint16)(unsafe.Pointer(&ifr[syscall.IFNAMSIZ])) = flags
 
-	// 3) Grava de volta as flags modificadas
 	_, _, errno = syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(fd),
