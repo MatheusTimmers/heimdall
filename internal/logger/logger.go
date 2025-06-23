@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/MatheusTimmers/heimdall/internal/parser"
 )
+
+const TimeFormat = "2006-01-02 15:04:05.000"
 
 type Logger struct {
 	writer *csv.Writer
@@ -85,10 +86,10 @@ func (l *Layer2Logger) Log(p parser.Layer2Info) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rec := []string{
-		p.Timestamp.Format(time.RFC3339Nano),
+		p.Timestamp.Format(TimeFormat),
 		p.SrcMAC,
 		p.DstMAC,
-		fmt.Sprintf("%#x", uint16(p.EtherType)),
+		fmt.Sprintf("%#06x", uint16(p.EtherType)),
 		fmt.Sprintf("%d", p.PacketLength),
 	}
 
@@ -104,7 +105,7 @@ func (l *Layer3Logger) Log(p parser.Layer3Info) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rec := []string{
-		p.Timestamp.Format(time.RFC3339Nano),
+		p.Timestamp.Format(TimeFormat),
 		p.ProtocolName,
 		p.SrcIP.String(),
 		p.DstIP.String(),
@@ -124,7 +125,7 @@ func (l *Layer4Logger) Log(p parser.Layer4Info) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rec := []string{
-		p.Timestamp.Format(time.RFC3339Nano),
+		p.Timestamp.Format(TimeFormat),
 		p.ProtocolName,
 		p.SrcIP.String(),
 		fmt.Sprintf("%d", p.SrcPort),

@@ -1,6 +1,6 @@
 module github.com/MatheusTimmers/heimdall
 
-go 1.23.2
+go 1.19
 
 require github.com/google/gopacket v1.1.19
 
